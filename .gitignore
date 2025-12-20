@@ -18,21 +18,7 @@ imgui.ini
 
 # =========================== LIB OBJ FILES ===========================
 lib/raylib/src/*.o
-lib/raylib/src/*.a
-lib/raylib/src/*.obj
-lib/raylib/src/*.exe
-lib/raylib/src/*.dll
-lib/raylib/src/*.so
-lib/raylib/src/*.dylib
-lib/raylib/src/*.d
-lib/raylib/src/core.*
-lib/raylib/src/rcore.*
-lib/raylib/src/rtext.*
-lib/raylib/src/rshapes.*
-lib/raylib/src/rtextures.*
-lib/raylib/src/rmodels.*
-lib/raylib/src/raudio.*
-lib/raylib/src/utils.*
+
 
 
 # ============================ VS STUFF ==============================
