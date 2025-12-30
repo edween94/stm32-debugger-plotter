@@ -27,7 +27,10 @@ IMPLOT_SRC := \
 
 RLIMGUI_SRC := $(RLIMGUI_DIR)/rlImGui.cpp
 
-PROJ_SRCS := src/main.cpp
+PROJ_SRCS := \
+	src/debug/STM32Detector.cpp \
+	src/debug/test_detector.cpp \
+
 
 SRCS := $(PROJ_SRCS) $(IMGUI_SRC) $(IMPLOT_SRC) $(RLIMGUI_SRC)
 
@@ -41,7 +44,7 @@ EXE :=
 
 # OS Detection
 ifeq ($(OS),Windows_NT)
-	LDLIBS += -lopengl32 -lgdi32 -lwinmm -lshell32
+	LDLIBS += -lopengl32 -lgdi32 -lwinmm -lshell32 -lws2_32
 	EXE := .exe
 	MKDIR = if not exist "$(subst /,\,$1)" mkdir "$(subst /,\,$1)"
 	RM = if exist "$(subst /,\,$(BUILD_DIR))" rmdir /S /Q "$(subst /,\,$(BUILD_DIR))"
