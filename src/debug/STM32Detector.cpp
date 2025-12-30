@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdio>
+#include <string>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -63,67 +64,69 @@ static std::string getLastError()
     #endif
 }
 
-static bool sendCommand(SocketType skt, const char* cmd, char* resp, int respSize)
+static void hexDump(const char* data, int len)
 {
-    std::string fullCmd = std::string(cmd) + "\r\n";
-    int sent = send(skt, fullCmd.c_str(), (int)fullCmd.size(), 0);
-    if (sent == SocketError)
+    printf("DEBUG HEX [%d bytes]: ", len);
+    for (int i = 0; i < len && i < 100; i++)
     {
-        printf("DEBUG: send() failed: %s\n", getLastError().c_str());
-        return false;
+        printf("%02X ", (unsigned char)data[i]);
     }
-
-    memset(resp, 0, respSize);
-    int total = 0;
-
-    for (int i = 0; i < 20; i++)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-        int received = recv(skt, resp + total, respSize - total - 1, 0);
-        if (received > 0) total += received;
-        else if (received == SocketError)
-        {
-            printf("DEBUG: recv() error: %s\n", getLastError().c_str());
-            break;
-        }
-
-        if (total <= 0) continue;
-
-        // Filter some telnet negotiation IAC sequences (0xFF ...)
-        std::string temp(resp, resp + total);
-        std::string filtered;
-        for (size_t k = 0; k < temp.size(); ++k)
-        {
-            unsigned char c = static_cast<unsigned char>(temp[k]);
-            if (c == 0xFF)
-            {
-                // skip simple IAC sequences (this is a best-effort filter)
-                if (k + 2 < temp.size()) k += 2;
-                continue;
-            }
-            filtered.push_back(static_cast<char>(c));
-        }
-
-        // copy filtered back into resp buffer
-        strncpy(resp, filtered.c_str(), respSize - 1);
-
-        // consider response complete if we see an address/value pair, or the OpenOCD prompt
-        if (filtered.find(": ") != std::string::npos) return true;
-        if (filtered.find("\n>") != std::string::npos) return true;
-        if (!filtered.empty() && (filtered.back() == '>')) return true;
-    }
-
-    return false;
+    printf("\n");
 }
 
-static uint32_t parseID(const char* resp)
+static std::string sendCommand(SocketType skt, const char* cmd)
 {
-    const char* colon = strchr(resp, ':');
-    if (!colon) return 0;
+    std::string fullCmd = std::string(cmd) + "\r\n";
+    if (send(skt, fullCmd.c_str(), (int)fullCmd.size(), 0) == SocketError)
+    {
+        return "";
+    }
 
+    std::string response;
+    char buffer[256];
+
+    for (int attempt = 0; attempt < 30; attempt++)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        int received = recv(skt, buffer, sizeof(buffer), 0);
+        if (received > 0)
+        {
+            // --- FIX START ---
+            // Manually append chars to avoid stopping at embedded nulls
+            for (int i = 0; i < received; i++)
+            {
+                if (buffer[i] != '\0') // Filter out null bytes
+                {
+                    response += buffer[i];
+                }
+            }
+            // --- FIX END ---
+            
+            printf("DEBUG: Chunk %d [%d bytes]\n", attempt, received);
+            // hexDump(buffer, received); // Optional: Keep for debugging if needed
+            
+            // Check for the standard OpenOCD prompt ">" indicating command finished
+            if (response.find(">") != std::string::npos)
+            {
+                // Ensure we also have the data (colon) before breaking
+                // Or just break on prompt and let the parser decide
+                break;
+            }
+        }
+    }
+
+    printf("DEBUG: Full response: [%s]\n", response.c_str());
+    return response;
+}
+
+static uint32_t parseID(const std::string& resp)
+{
+    size_t colonPos = resp.find(": ");
+    if (colonPos == std::string::npos) return 0;
+    
     uint32_t value = 0;
-    if (sscanf(colon + 1, "%x", &value) == 1) return value;
+    if (sscanf(resp.c_str() + colonPos + 2, "%x", &value) == 1) return value;
 
     return 0;
 }
@@ -150,8 +153,8 @@ const char* getSTM32Config(uint16_t d_ID)
         {0x497, "stm32wlx.cfg"}
     };
 
-    auto targetSTM32 = STM32_CONFIGS.find(d_ID);
-    return (targetSTM32 != STM32_CONFIGS.end()) ? targetSTM32->second : nullptr;
+    auto it = STM32_CONFIGS.find(d_ID);
+    return (it != STM32_CONFIGS.end()) ? it->second : nullptr;
 }
 
 DetectionResult DetectedSTM32(int telnetPort)
@@ -174,12 +177,12 @@ DetectionResult DetectedSTM32(int telnetPort)
     }
 
     #ifdef _WIN32
-        DWORD timeout = 2000;
+        DWORD timeout = 200;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     #else
         struct timeval tv;
-        tv.tv_sec = 2;
-        tv.tv_usec = 0;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
         setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     #endif
 
@@ -190,58 +193,54 @@ DetectionResult DetectedSTM32(int telnetPort)
 
     if (connect(sock, reinterpret_cast<sockaddr*>(&server), sizeof(server)) == SocketError)
     {
-        result.errMsg = "Failed to connect to OpenOCD on port " + std::to_string(telnetPort) + ": " + getLastError();
+        result.errMsg = "Failed to connect to OpenOCD on port " + std::to_string(telnetPort);
         closesocket(sock);
         socketCleanup();
         return result;
     }
 
-    printf("DEBUG: Connected to OpenOCD\n");
+    printf("DEBUG: Connected to OpenOCD telnet port %d\n", telnetPort);
 
-    char buffer[512];
-    memset(buffer, 0, sizeof(buffer));
-    int r = recv(sock, buffer, sizeof(buffer) - 1, 0);
-    printf("DEBUG: Welcome recv returned %d bytes: [%s]\n", r, buffer);
-    if (r > 0)
+    char buffer[256];
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    int welcomeBytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
+    if (welcomeBytes > 0)
     {
-        printf("DEBUG: Welcome raw bytes:");
-        for (int i = 0; i < r; ++i) printf(" %02X", (unsigned char)buffer[i]);
-        printf("\n");
+        buffer[welcomeBytes] = '\0';
+        printf("DEBUG: Welcome [%d bytes]\n", welcomeBytes);
+        hexDump(buffer, welcomeBytes);
     }
 
     for (auto addr : IDCODE_ADDRS)
     {
         char cmd[32];
         snprintf(cmd, sizeof(cmd), "mdw 0x%08X", addr);
-        printf("DEBUG: Sending: %s\n", cmd);
+        printf("\nDEBUG: Sending: %s\n", cmd);
 
-        if (sendCommand(sock, cmd, buffer, sizeof(buffer)))
+        std::string resp = sendCommand(sock, cmd);
+        uint32_t idcode = parseID(resp);
+        printf("DEBUG: Parsed IDCODE: 0x%08X, devId: 0x%03X\n", idcode, idcode & 0xFFF);
+
+        if (idcode != 0 && idcode != 0xFFFFFFFF)
         {
-            printf("DEBUG: Response: [%s]\n", buffer);
-            uint32_t idcode = parseID(buffer);
-            printf("DEBUG: Parsed: 0x%08X, devId: 0x%03X\n", idcode, idcode & 0xFFF);
+            uint16_t devId = idcode & 0xFFF;
+            const char* config = getSTM32Config(devId);
 
-            if (idcode != 0)
+            if (config)
             {
-                uint16_t devId = idcode & 0xFFF;
-                const char* config = getSTM32Config(devId);
-
-                if (config)
-                {
-                    result.success = true;
-                    result.devID = devId;
-                    result.configFileName = config;
-                    break;
-                }
+                result.success = true;
+                result.devID = devId;
+                result.configFileName = config;
+                printf("DEBUG: Found config: %s\n", config);
+                break;
             }
-        }
-        else
-        {
-            printf("DEBUG: sendCommand failed\n");
         }
     }
 
-    if (!result.success && result.errMsg.empty()) result.errMsg = "Unknown or unsupported STM32 device";
+    if (!result.success && result.errMsg.empty())
+    {
+        result.errMsg = "Unknown or unsupported STM32 device";
+    }
 
     closesocket(sock);
     socketCleanup();
